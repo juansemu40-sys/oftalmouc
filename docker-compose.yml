@@ -1,0 +1,75 @@
+# Ecosistema completo: PostgreSQL + API (FastAPI + Whisper) + Web (React servido por nginx).
+# Arranque: ./run.sh   (o: docker compose up --build)
+name: oftalmologia-ia
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-oftalmologia}
+      POSTGRES_USER: ${POSTGRES_USER:-oftalmologia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-oftalmologia_local}
+    volumes:
+      - datos_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      args:
+        WHISPER_MODEL: ${WHISPER_MODEL:-small}
+        PRECARGAR_WHISPER: ${PRECARGAR_WHISPER:-true}
+        VOZ_PIPER: ${VOZ_PIPER:-es_MX-claude-high}
+        PRECARGAR_VOZ: ${PRECARGAR_VOZ:-true}
+    env_file: .env
+    environment:
+      # La API siempre habla con el contenedor "db"; se arma aquí para que no dependa de editar .env.
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-oftalmologia}:${POSTGRES_PASSWORD:-oftalmologia_local}@db:5432/${POSTGRES_DB:-oftalmologia}
+      # Dirección a la que apunta el código QR del paciente: la de Tailscale Funnel (abre desde cualquier red)
+      # o la IP del PC en el Wi-Fi. run.ps1 la detecta; .env puede fijarla.
+      URL_PUBLICA: ${URL_PUBLICA:-}
+      # Ruta de la voz de Piper descargada al construir la imagen.
+      VOZ_MODELO: /modelos/voz/${VOZ_PIPER:-es_MX-claude-high}.onnx
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Solo en este PC (127.0.0.1): la API y su documentación no se ven desde la red. La app usa /api por nginx.
+      - "127.0.0.1:${PUERTO_API:-8000}:8000"   # http://localhost:8000/docs (Swagger)
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/salud', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${PUERTO_WEB:-8080}:80"     # http://localhost:8080
+    restart: unless-stopped
+
+  # Puerta hacia internet para el código QR del paciente (ver puerta/nginx.conf).
+  # Solo escucha dentro de este PC (127.0.0.1); Tailscale Funnel la publica con HTTPS.
+  # Desde internet solo se ve la página del paciente: la pantalla del médico y la API responden 404.
+  puerta:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./puerta/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - frontend
+    ports:
+      - "127.0.0.1:${PUERTO_PUERTA:-8090}:80"
+    restart: unless-stopped
+
+volumes:
+  datos_pg:
